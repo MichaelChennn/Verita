@@ -1,6 +1,6 @@
-# AI 科技日报 — 立项书（v0.1 草案）
+# AI 科技日报（ai-daily）— 立项书 v0.2
 
-> 状态：草案，等待确认 · 日期：2026-10-19
+> 状态：已确认（v0.2） · 日期：2026-10-20 · 新仓库：`ai-daily`（公开）
 > 前身：Verita（AI 知识社区 + 每日 Digest）
 
 ---
@@ -31,6 +31,9 @@ Verita 最初是从“AI 科技日报”这个想法出发的，后来逐渐加�
 | 目标读者 | 中文 AI 开发者 | 中文写作；信源以英文一手资料为主。“英文一手资料 → 中文精炼”本身就是核心价值。 |
 | 分发渠道 | 网站 + RSS | 静态站点存档每一期，RSS 推送全文。不需要账号、不需要登录。 |
 | 人工参与 | **全自动** | 每天直接看到成品，不需要人工纠正。所以**质量保障必须靠系统本身**（见第 6 节），这是本项目最重要的技术挑战。 |
+| 发布节奏 | 北京时间 06:00，覆盖过去 24 小时 | 生成从 05:30 开始，06:30 兜底检查 |
+| 生成方式 | 确定性抓取 + Claude 定时任务当编辑 | 见第 8 节；不需要自己管理 LLM API key |
+| 仓库 | 新建公开仓库 `ai-daily` | Verita 打 tag `verita-final` 归档，只迁移可复用代码 |
 
 ---
 
@@ -134,27 +137,40 @@ Verita 最初是从“AI 科技日报”这个想法出发的，后来逐渐加�
 
 ## 8. 技术方案（极简优先）
 
+**分工原则：** 抓取和校验写成确定性代码（可复现、可测试）；"编辑"工作交给 Claude 定时任务（能打开原文、能补漏）。
+
 ```
-GitHub Actions (cron, 每天 UTC 22:00 ≈ 北京时间 06:00)
-   │
-   ▼
-Python 流水线：fetch → normalize → dedupe/cluster → score → generate → verify → render
-   │                                                          │
-   ▼                                                          ▼
-data/YYYY-MM-DD/*.json（原始候选 + 最终日报，提交回仓库）    site/（静态 HTML + RSS）
-                                                              │
-                                                              ▼
-                                                    GitHub Pages / Cloudflare Pages
+北京时间 05:30  Claude 定时任务（每次新开一个 cloud session，按 skill 执行）
+  1. python -m daily fetch      → 抓取固定信源，写入 data/YYYY-MM-DD/candidates.json
+  2. Claude 当编辑（.claude/skills/daily-editor/SKILL.md）：
+       打分筛选 → 对入选条目用 WebFetch 打开原文 → 合并同一事件
+       → 写中文日报 data/YYYY-MM-DD/digest.json
+       （可用 WebSearch 补充固定信源漏掉的重大事件，但必须拿到一手链接）
+  3. python -m daily validate   → 程序校验：结构合法；每个链接都来自候选集或 WebFetch 打开过的页面
+  4. git commit & push          → GitHub Actions 构建静态站点 + RSS → GitHub Pages
+
+北京时间 06:30  GitHub Actions 兜底
+  当天没有 digest.json → 用 candidates.json 发布"标题 + 链接"降级版；如果连候选都没有 → Actions 失败通知
 ```
 
-- **无服务器、无数据库**：Git 仓库本身就是存储，历史数据用于跨天去重和回顾。
-- **单一 Python 项目**：一条命令可以在本地完整跑一遍（`python -m daily run --date 2026-10-20`），方便调试。
-- **LLM**：通过配置切换 provider。打分用便宜的模型，生成和自检用更强的模型。每日成本在 M2 实测后确定，目标是“几乎可以忽略”。
+### LLM 的职责（以及不需要它做的事）
+| 职责 | 由谁完成 |
+|---|---|
+| 抓取信源、拿到原文 | 代码（HTTP / RSS / API），Claude 的 WebFetch 作为补充 |
+| 打分排序、合并同一事件、写中文摘要 | Claude |
+| 摘要是否忠实于原文 | Claude 对照已打开的原文自检，不通过就丢弃该条 |
+| 链接真实性、结构合法性 | 代码（`validate`） |
+| 事件本身真伪 | 不需要额外核实：只用一手来源，来源本身就是事实依据 |
+
+### 关键约束
+- **无服务器、无数据库**：Git 仓库本身就是存储，`data/` 下按日期保存候选和成品，用于跨天去重和回顾。
+- **本地可完整运行**：`fetch` / `validate` / `build` 都能在本地单独执行；编辑环节也可以在本地 Claude Code 里手动调用 skill。
+- **成本**：消耗 Claude 订阅用量，不需要单独的 API key；抓取类 API（GitHub token 等）放在 Actions secrets / 环境变量里。
+- **前端**：纯静态，外观完全自由（手写或 Astro 等均可），保留全部历史存档，首页默认展示最近 30 天。
 - **可复用的 Verita 资产**：
-  - `genai-service/app/services/external_sources.py`：GitHub / HF / GNews 抓取逻辑、HF 噪音过滤规则
-  - `genai-service/app/services/digest_generator.py`：结构化输出、source ID 引用校验的思路、重试逻辑
+  - `genai-service/app/services/external_sources.py`：GitHub / HF 抓取逻辑、HF 噪音过滤规则
+  - `genai-service/app/services/digest_generator.py`：结构化输出 schema、source ID 引用校验思路
   - `genai-service/app/services/output_sanitizer.py`：输出清洗
-  - LLM provider 抽象（含本地 Ollama 支持）
 
 ---
 
@@ -178,8 +194,8 @@ data/YYYY-MM-DD/*.json（原始候选 + 最终日报，提交回仓库）    sit
 |---|---|---|
 | **M0 立项** | 本文档；确定仓库处理方式 | 文档确认 |
 | **M1 信源与数据** | 实现所有 fetcher，输出每日原始候选 JSON；去重与聚类 | 连续跑 7 天，人工抽查：重要事件覆盖率 ≥ 90% |
-| **M2 生成与质量闸门** | 打分、生成、程序校验、LLM 自检、降级 | 回放 M1 的 7 天数据，错误条目为 0，自己觉得“能读” |
-| **M3 发布** | 静态站点 + RSS + 定时任务 + 失败告警 | 无人干预自动发布 3 天 |
+| **M2 编辑 skill 与质量闸门** | daily-editor skill、validate、降级流程 | 回放 M1 的 7 天数据，错误条目为 0，自己觉得“能读” |
+| **M3 发布** | 静态站点 + RSS + Claude 定时任务 + Actions 兜底与告警 | 无人干预自动发布 3 天 |
 | **M4 自用期** | 自己每天读，每周调优一次 | 达成第 9 节的产品指标 |
 | 之后 | 视自用情况决定：邮件订阅、周报、话题筛选、分享给同学 / 同事 | — |
 
@@ -190,6 +206,8 @@ data/YYYY-MM-DD/*.json（原始候选 + 最终日报，提交回仓库）    sit
 | 风险 | 应对 |
 |---|---|
 | LLM 幻觉 / 夸大 | 第 6 节的多道闸门；不通过的条目直接丢弃 |
+| Claude 定时任务失败或额度用尽 | 06:30 Actions 兜底发布降级版；连续失败时告警 |
+| 编辑结果每天不一致 | skill 里写死 rubric 和输出 schema；`validate` 程序把关 |
 | 信源 API 限流或变更 | 每个 fetcher 相互隔离，单个失败不影响整体；优先使用 RSS 和官方 API；失败时告警 |
 | 内容版权 | 只做摘要和评述，不转载全文，始终附原文链接 |
 | 范围蔓延（重蹈 Verita 覆辙） | 第 5 节的非目标清单；加任何功能前先回答“它能不能让我更愿意每天读” |
@@ -197,9 +215,13 @@ data/YYYY-MM-DD/*.json（原始候选 + 最终日报，提交回仓库）    sit
 
 ---
 
-## 12. 待决问题
+## 12. 已决与待决
 
-1. **仓库怎么处理？** 推荐：给当前代码打 tag `verita-final` 归档，然后在新仓库（或本仓库清空后）重新开始，只把第 8 节列出的可复用代码迁移过去。
-2. **项目名**：继续叫 Verita，还是起一个新名字？
-3. **LLM 提供方**：Verita 现在用的是 Logos，需要确认它在课程结束后是否还能用；否则需要准备自己的 API key。
-4. **发布时间**：北京时间 06:00 是否合适？日报统计的时间窗口是“过去 24 小时”还是“前一个自然日”？
+**已决（2026-10-20）**
+- 新建公开仓库 `ai-daily`；Verita 归档。
+- 北京时间 06:00 发布，覆盖过去 24 小时。
+- 生成方式：确定性抓取 + Claude 定时任务编辑 + Actions 兜底（第 8 节）。
+
+**待决**
+1. 前端技术选型与视觉风格（在新仓库中设计）。
+2. 每日用量上限：编辑环节最多打开多少篇原文、最多用多少次 WebSearch。
